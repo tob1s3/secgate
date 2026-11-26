@@ -16,7 +16,7 @@ dependencies = []
 secgate = "secgate.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "jsonschema>=4.22"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.17.6", "jsonschema>=4.22"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
