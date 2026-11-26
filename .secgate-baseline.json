@@ -1,0 +1,4 @@
+{
+  "_comment": "Принятые риски. Каждая запись: fingerprint (из `secgate fingerprints`), reason, expires (не дальше 180 дней), owner. Пример — в examples/baseline.example.json.",
+  "exceptions": []
+}

@@ -1,0 +1,10 @@
+{
+  "exceptions": [
+    {
+      "fingerprint": "0123456789abcdef",
+      "reason": "Уязвимый код в jinja2 (urlize) не вызывается; обновление до 3.x запланировано в задаче INFRA-142",
+      "expires": "2027-03-01",
+      "owner": "team-backend"
+    }
+  ]
+}

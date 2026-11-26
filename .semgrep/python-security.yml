@@ -1,0 +1,55 @@
+# Собственные правила Semgrep. Не зависят от реестра правил, поэтому работают офлайн и в закрытом контуре.
+rules:
+  - id: subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess вызывается с shell=True и строкой, собранной из данных: возможна командная инъекция.
+      Передавайте аргументы списком и без shell=True.
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+      owasp: ["A03:2021 - Injection"]
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FUNC(f"...", ..., shell=True, ...)
+          - pattern: subprocess.$FUNC($A + $B, ..., shell=True, ...)
+          - pattern: subprocess.$FUNC($S.format(...), ..., shell=True, ...)
+
+  - id: yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: yaml.load с небезопасным загрузчиком может создать произвольные объекты. Используйте yaml.safe_load.
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+    pattern-either:
+      - pattern: yaml.load($X, Loader=yaml.Loader)
+      - pattern: yaml.load($X, Loader=yaml.UnsafeLoader)
+      - pattern: yaml.unsafe_load(...)
+
+  - id: pickle-loads
+    languages: [python]
+    severity: WARNING
+    message: pickle.loads на недоверенных данных позволяет выполнить код. Используйте JSON или подписывайте данные.
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+
+  - id: weak-hash-for-password
+    languages: [python]
+    severity: WARNING
+    message: MD5/SHA1 не подходят для хранения паролей. Используйте argon2, bcrypt или scrypt.
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: requests-verify-false
+    languages: [python]
+    severity: ERROR
+    message: Отключена проверка TLS-сертификата — соединение уязвимо к MITM.
+    metadata:
+      cwe: ["CWE-295: Improper Certificate Validation"]
+    pattern: requests.$METHOD(..., verify=False, ...)

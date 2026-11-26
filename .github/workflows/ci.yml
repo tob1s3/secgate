@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# По умолчанию — только чтение. Права расширяются точечно в тех job, где они нужны.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
+      - name: Lint workflows and Dockerfile
+        if: matrix.python == '3.12'
+        run: |
+          pipx run --spec actionlint-py actionlint
+          pipx run --spec hadolint-py hadolint Dockerfile
+
+  # secgate проверяет сам себя: те же сканеры и тот же гейт, что предлагается другим проектам.
+  security:
+    name: security gate (self-scan)
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      security-events: write # загрузка SARIF в Code Scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Сканеры ставятся через pipx в изолированные окружения: pip-audit должен проверять
+      # зависимости проекта, а не зависимости самих сканеров.
+      - name: Install scanners
+        run: |
+          pipx install bandit
+          pipx install semgrep
+          pipx install pip-audit
+      - name: Install secgate with dev dependencies
+        run: pip install -e '.[dev]'
+
+      # Сканеры не останавливают сборку сами: они только собирают отчёты, вердикт выносит secgate.
+      # Код выхода 1 у bandit/pip-audit означает «есть находки» и ошибкой не считается.
+      - name: Bandit (SAST)
+        run: bandit -r src -f json -o bandit.json || [ $? -eq 1 ]
+      - name: Semgrep (SAST, собственные правила)
+        run: semgrep scan --metrics=off --config .semgrep/python-security.yml --json -o semgrep.json src
+      - name: pip-audit (SCA)
+        run: |
+          pip freeze --exclude-editable > frozen-requirements.txt
+          pip-audit --disable-pip --no-deps -r frozen-requirements.txt -f json -o pip-audit.json || [ $? -eq 1 ]
+      - name: Trivy (зависимости, Dockerfile, секреты)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          skip-dirs: examples
+          format: json
+          output: trivy.json
+          exit-code: "0"
+
+      - name: secgate
+        run: >
+          secgate check bandit.json semgrep.json pip-audit.json trivy.json
+          --policy secgate.toml --baseline .secgate-baseline.json
+          --sarif secgate.sarif --metrics secgate.prom
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('secgate.sarif') != ''
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          sarif_file: secgate.sarif
+          category: secgate
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            *.json
+            secgate.sarif
+            secgate.prom
+
+  # Демонстрация: на заведомо уязвимом приложении гейт обязан остановить сборку.
+  # Если он вдруг пропустит — это регрессия, и job упадёт.
+  demo:
+    name: gate blocks vulnerable example
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e . bandit pip-audit semgrep
+      - name: Scan examples/vulnerable-app
+        working-directory: examples/vulnerable-app
+        run: |
+          bandit -r . -f json -o ../../demo-bandit.json || [ $? -eq 1 ]
+          semgrep scan --metrics=off --config ../../.semgrep/python-security.yml --json -o ../../demo-semgrep.json .
+          pip-audit -r requirements.txt -f json -o ../../demo-pip-audit.json || [ $? -eq 1 ]
+      - name: Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: examples/vulnerable-app
+          scanners: vuln,misconfig,secret
+          format: json
+          output: demo-trivy.json
+          exit-code: "0"
+      - name: Gate must block
+        run: |
+          set +e
+          secgate check demo-*.json --sarif demo.sarif --project vulnerable-app
+          code=$?
+          set -e
+          echo "secgate exit code: $code"
+          test "$code" -eq 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: demo-reports
+          path: demo*
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: secgate:ci
+      - name: Smoke test (non-root, работает на тестовых отчётах)
+        run: |
+          test "$(docker run --rm --entrypoint id secgate:ci -u)" != "0"
+          docker run --rm secgate:ci --version
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures:/reports:ro" secgate:ci check /reports/trivy.json
+          test $? -eq 1
